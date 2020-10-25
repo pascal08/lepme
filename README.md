@@ -2,9 +2,9 @@
 
 #### Commands
 
-`lepme create <name_of_module>`
-`lepme install`
-`lepme delete <name_of_module>`
+`lepme create <name_of_module>`  
+`lepme install`  
+`lepme delete <name_of_module>`  
 
 
 
