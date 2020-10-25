@@ -1,0 +1,669 @@
+#!/usr/bin/env bash
+
+###############################################################################
+# Strict Mode
+###############################################################################
+
+set -o nounset
+set -o errtrace
+set -o errexit
+set -o pipefail
+set -o noglob
+
+# Set IFS to just newline and tab at the start
+#
+# http://www.dwheeler.com/essays/filenames-in-shell.html
+#
+# $DEFAULT_IFS and $SAFER_IFS
+#
+# $DEFAULT_IFS contains the default $IFS value in case it's needed, such as
+# when expanding an array and you want to separate elements by spaces.
+# $SAFER_IFS contains the preferred settings for the program, and setting it
+# separately makes it easier to switch between the two if needed.
+DEFAULT_IFS="${IFS}"
+SAFER_IFS=$'\n\t'
+IFS="${SAFER_IFS}"
+
+###############################################################################
+# Debug
+###############################################################################
+
+# _debug()
+#
+# Usage:
+#   _debug printf "Debug info. Variable: %s\\n" "$0"
+#
+# A simple function for executing a specified command if the `$_USE_DEBUG`
+# variable has been set. The command is expected to print a message and
+# should typically be either `echo`, `printf`, or `cat`.
+__DEBUG_COUNTER=0
+_debug() {
+  if [[ "${_USE_DEBUG:-"0"}" -eq 1 ]]
+  then
+    __DEBUG_COUNTER=$((__DEBUG_COUNTER+1))
+    # Prefix debug message with "bug (U+1F41B)"
+    printf "🐛  %s " "${__DEBUG_COUNTER}"
+    "${@}"
+    printf "――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――\\n"
+  fi
+}
+# debug()
+#
+# Usage:
+#   debug "Debug info. Variable: $0"
+#
+# Print the specified message if the `$_USE_DEBUG` variable has been set.
+#
+# This is a shortcut for the _debug() function that simply echos the message.
+debug() {
+  _debug echo "${@}"
+}
+
+###############################################################################
+# Die
+###############################################################################
+
+# _die()
+#
+# Usage:
+#   _die printf "Error message. Variable: %s\n" "$0"
+#
+# A simple function for exiting with an error after executing the specified
+# command. The command is expected to print a message and should typically
+# be either `echo`, `printf`, or `cat`.
+_die() {
+  printf "✗  "
+  "${@}" 1>&2
+  exit 1
+}
+# die()
+#
+# Usage:
+#   die "Error message. Variable: $0"
+#
+# Exit with an error and print the specified message.
+#
+# This is a shortcut for the _die() function that simply echos the message.
+die() {
+  _die echo "${@}"
+}
+
+# _success()
+#
+# Usage:
+#   _success printf "Success message. Variable: %s\n" "$0"
+#
+_success() {
+  printf "✓  ${1}" "${2}"
+}
+
+###############################################################################
+# .lepmerc
+###############################################################################
+
+# .lepmerc
+#
+# If a `.lepmerc` file exists in `$HOME`, source it.
+if [[ -e "${HOME}/.lepmerc" ]]
+then
+  LEPMERC="${HOME}/.lepmerc"
+fi
+
+if [[ -n "${LEPMERC:-}" ]]
+then
+  # https://github.com/koalaman/shellcheck/wiki/SC1090
+  # shellcheck source=/dev/null
+  source "${LEPMERC:-}"
+fi
+
+###############################################################################
+# Globals
+###############################################################################
+
+# Version #####################################################################
+
+_LEPME_VERSION="0.1.0"
+
+# Editor ######################################################################
+
+EDITOR="vim"
+
+# Default Command #############################################################
+
+DEFAULT_COMMAND="${DEFAULT_COMMAND:-help}"
+
+# Options #####################################################################
+
+_RAW_OPTIONS="$*"
+
+# Parse Options ###############################################################
+
+_COMMAND_ARGV=("${0}")
+
+_CMD=""
+
+_USE_DEBUG=0
+
+while [[ ${#} -gt 0 ]]
+do
+  opt="${1}"
+  shift
+  case "${opt}" in
+    -h|--help)
+      _CMD="help"
+      ;;
+    --version)
+      _CMD="version"
+      ;;
+    --debug)
+      _USE_DEBUG=1
+      ;;
+    *)
+      # The first argument encountered is assumed to be the
+      # command name, and all subsequent arguments are set as command
+      # arguments.
+      if [[ -n ${_CMD} ]]
+      then
+        _COMMAND_ARGV+=("${opt}")
+      else
+        _CMD=${opt}
+      fi
+      ;;
+  esac
+done
+
+_COMMAND_PARAMETERS=("${_COMMAND_ARGV[@]}")
+unset "_COMMAND_PARAMETERS[0]"
+
+_debug printf \
+  "\${_CMD}: %s\\n" \
+  "${_CMD}"
+_debug printf \
+  "\${_RAW_OPTIONS} (one per line):\\n%s\\n" \
+  "${_RAW_OPTIONS}"
+_debug printf \
+  "\${_COMMAND_ARGV[*]}: %s\\n" \
+  "${_COMMAND_ARGV[*]}"
+_debug printf \
+  "\${_COMMAND_PARAMETERS[*]:-}: %s\\n" \
+  "${_COMMAND_PARAMETERS[*]:-}"
+
+###############################################################################
+# Environment
+###############################################################################
+
+_ME="$(basename "${0}")"
+_ME_DIR="$(dirname "${0}")"
+
+_debug printf "\${_ME}: %s\\n" "${_ME}"
+
+if [[ -z "${_HOME_PATH:-}" ]]
+then
+  _HOME_PATH="${HOME}"
+fi
+
+_debug printf "\${_HOME_PATH}: %s\\n" "${_HOME_PATH}"
+
+if [[ -z "${LEPMEPATH:-}" ]]
+then
+  LEPMEPATH="${_HOME_PATH}/.lepme"
+fi
+# If `$_LEPMEPATH` is present in the environment, override `$LEPMEPATH` with
+# its value. This provides a mechanism for overriding `$LEPMEPATH` for
+# internal purposes such as testing.
+if [[ -n "${_LEPMEPATH:-}" ]]
+then
+  LEPMEPATH="${_LEPMEPATH}"
+fi
+
+_debug printf "\${LEPMEPATH}: %s\\n" "${LEPMEPATH}"
+
+###############################################################################
+# Load Commands
+###############################################################################
+
+# Initialize $_DEFINED_COMMANDS array.
+_DEFINED_COMMANDS=()
+
+# _load_commands()
+#
+# Usage:
+#   _load_commands
+#
+# Loads all of the commands sourced in the environment.
+_load_commands() {
+
+  _debug printf "_load_commands(): entering...\\n"
+  _debug printf "_load_commands() declare -F:\\n%s\\n" "$(declare -F)"
+
+  # declare is a bash built-in shell function that, when called with the '-F'
+  # option, displays all of the functions with the format
+  # `declare -f function_name`. These are then assigned as elements in the
+  # $function_list array.
+  local _function_list=($(declare -F))
+
+  for __name in "${_function_list[@]}"
+  do
+    # Each element has the format `declare -f function_name`, so set the name
+    # to only the 'function_name' part of the string.
+    local _function_name
+    _function_name=$(printf "%s" "${__name}" | awk '{ print $3 }')
+
+    _debug printf \
+      "_load_commands() \${_function_name}: %s\\n" \
+      "${_function_name}"
+
+    # Add the function name to the $_DEFINED_COMMANDS array unless it starts
+    # with an underscore or is one of the desc(), debug(), or die() functions,
+    # since these are treated as having 'private' visibility.
+    if ! { [[ "${_function_name}" =~ ^_(.*)  ]] || \
+           [[ "${_function_name}" == "desc"  ]] || \
+           [[ "${_function_name}" == "debug" ]] || \
+           [[ "${_function_name}" == "die"   ]]
+    }
+    then
+      _DEFINED_COMMANDS+=("${_function_name}")
+    fi
+  done
+
+  _debug printf \
+    "commands() \${_DEFINED_COMMANDS[*]:-}:\\n%s\\n" \
+    "${_DEFINED_COMMANDS[*]:-}"
+}
+
+###############################################################################
+# Main
+###############################################################################
+
+_main() {
+  if [[ -z ${_CMD} ]]
+  then
+    _CMD="${DEFAULT_COMMAND}"
+  fi
+
+  _load_commands
+
+  if _contains "${_CMD}" "${_DEFINED_COMMANDS[*]:-}"
+  then
+    ${_CMD} "${_COMMAND_PARAMETERS[@]:-}"
+  else
+    _die printf "Unknown command: %s\\n" "${_CMD}"
+  fi
+}
+
+###############################################################################
+# Utility Functions
+###############################################################################
+
+# _each_file()
+#
+# Usage:
+#   _each_file directory function
+#
+# Iterate over the files in the specified directory and execute the specified
+# function.
+_each_file() {
+  set +o noglob
+  local _search_files=("${1}"/*)
+  set -o noglob
+
+  local _callback_function="${2}"
+
+  _debug printf \
+    "_each_file() \${#_search_files[@]}: %s\\n" \
+    "${#_search_files[@]}"
+
+  for __file_path in "${_search_files[@]}"
+  do
+    local _file_basename
+    _file_basename="$(basename "${__file_path}")"
+
+    ${_callback_function} \
+      "${__file_path}" \
+      "${_file_basename}"
+  done
+}
+
+# _each_original_file()
+#
+# Usage:
+#   _each_original_file function
+#
+# Iterate over the files in the original directory and execute the specified
+# function.
+_each_original_file() {
+  _each_file "${1}" "${2}"
+}
+
+# _contains()
+#
+# Usage:
+#   _contains "$item" "${list[*]}"
+#
+# Returns:
+#   0  If the item is included in the list.
+#   1  If not.
+_contains() {
+  local _test_list=(${*:2})
+  for __test_element in "${_test_list[@]:-}"
+  do
+    if [[ "${__test_element}" == "${1}" ]]
+    then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# _command_argv_includes()
+#
+# Usage:
+#   _command_argv_includes "an_argument"
+#
+# Returns:
+#   0  If the argument is included in `$_COMMAND_ARGV`, the program's command
+#      argument list.
+#   1  If not.
+#
+# This is a shortcut for simple cases where a command wants to check for the
+# presence of options quickly without parsing the options again.
+_command_argv_includes() {
+  _contains "${1}" "${_COMMAND_ARGV[*]}"
+}
+
+###############################################################################
+# desc
+###############################################################################
+
+desc() {
+  set +e
+  [[ -z "${1:-}" ]] && _die printf "desc(): No command name specified.\\n"
+
+  if [[ "${1}" == "--get" ]]
+  then # get ------------------------------------------------------------------
+    [[ -z "${2:-}" ]] && _die printf "desc(): No command name specified.\\n"
+
+    local _name="${2:-}"
+    local _desc_var="___desc_${_name}"
+
+    if [[ -n "${!_desc_var:-}" ]]
+    then
+      printf "%s\\n" "${!_desc_var}"
+    else
+      printf "No additional information for \`%s\`\\n" "${_name}"
+    fi
+  else # set ------------------------------------------------------------------
+    if [[ -n "${2:-}" ]]
+    then # argument is present
+      read -r -d '' "___desc_${1}" <<HEREDOC
+${2}
+HEREDOC
+
+      _debug printf "desc() set with argument: \${___desc_%s}\\n" "${1}"
+    else # no argument is present, so assume piped input
+      read -r -d '' "___desc_${1}"
+
+      _debug printf "desc() set with pipe: \${___desc_%s}\\n" "${1}"
+    fi
+  fi
+  set -e
+}
+
+###############################################################################
+# Default Commands
+###############################################################################
+
+# Version #####################################################################
+
+desc "version" <<HEREDOC
+Usage:
+  ${_ME} ( version | --version )
+
+Description:
+  Display the current program version.
+  To save you the trouble, the current version is ${_LEPME_VERSION}
+HEREDOC
+version() {
+  printf "%s\\n" "${_LEPME_VERSION}"
+}
+
+# Help ########################################################################
+
+desc "help" <<HEREDOC
+Usage:
+  ${_ME} help [<command>]
+
+Description:
+  Display help information for ${_ME} or a specified command.
+HEREDOC
+help() {
+  if [[ ${#_COMMAND_ARGV[@]} = 1 ]]
+  then
+    cat <<HEREDOC
+        _______  _____  _______ _______
+ |      |______ |_____] |  |  | |______
+ |_____ |______ |       |  |  | |______
+                                       
+Linux environment provisioning made easy.
+
+Version: ${_LEPME_VERSION}
+
+Usage:
+  ${_ME} <command> [<arguments>]
+  ${_ME} -h | --help
+  ${_ME} --version
+
+Options:
+  --debug    Print debug information.
+  -h --help  Display this help information.
+  --version  Display version information.
+
+Help:
+  ${_ME} help [<command>]
+
+Home:
+  https://github.com/pascal08/lepme
+
+$(commands)
+HEREDOC
+  else
+    desc --get "${1}"
+  fi
+}
+
+# Command List ################################################################
+
+desc "commands" <<HEREDOC
+Usage:
+  ${_ME} commands [--raw]
+
+Options:
+  --raw  Display the command list without formatting.
+
+Description:
+  Display the list of available commands.
+HEREDOC
+commands() {
+  if _command_argv_includes "--raw"
+  then
+    printf "%s\\n" "${_DEFINED_COMMANDS[@]:-}"
+  else
+    printf "Available commands:\\n"
+    printf "  %s\\n" "${_DEFINED_COMMANDS[@]:-}"
+  fi
+}
+
+###############################################################################
+# Commands
+###############################################################################
+
+# install #####################################################################
+
+desc "install" <<HEREDOC
+Usage:
+  ${_ME} install
+
+Description:
+  Install modules specified in ${LEPMERC}.
+HEREDOC
+install() {
+  #_install_log=""
+  for module in "${modules[@]}" 
+  do
+    if [ -f "${LEPMEPATH}/modules/$module/$module.sh" ]; then
+      sh "${LEPMEPATH}/modules/$module/$module.sh"
+      echo "[✓] $module"
+    else 
+      echo "[✗] $module"	    
+      #_install_log="${_install_log} Path ${LEPMEPATH}/modules/$module/$module.sh does not exist. Could not install module.\n"
+    fi
+    #printf ${_install_log}
+  done
+}
+
+# create ######################################################################
+
+desc "create" <<HEREDOC
+Usage:
+  ${_ME} create <module-name> [--template <module-template>]
+
+Options:
+  --template  Specify a template to create the new module with.
+
+Description:
+  Create a new module.
+HEREDOC
+_create_var_value() {
+    eval echo \$$1
+}
+
+_create_list_templates() {
+  _list_item() {
+    local _file_path="${1:-}"
+
+    local _file_basename="${2:-}"
+
+    if [[ -f ${_file_path} ]]
+    then
+      printf "%s\\n" "${_file_basename}"
+    fi
+  }
+
+  _each_original_file "${LEPMEPATH}/templates" "_list_item"
+}
+
+create() {
+  local _module_name="${1:-}"
+  local _template_path="${2:-}"
+
+  if [[ -z "${_module_name}" ]]
+  then
+    _die printf "Module name not provided.\\n"
+  fi
+
+  if [[ ! -f "${_template_path}" ]]
+  then
+    local _module_dir="${LEPMEPATH}/modules/${_module_name}"
+    local _module_file="${_module_dir}/${_module_name}.sh"
+
+    if [[ -f "${_module_file}" ]]
+    then
+      _die printf "Module already exists.\\n"
+    fi
+
+    mkdir -p ${_module_dir}
+    touch ${_module_file}
+
+    _success "Created empty module %s.\\n" "${_module_file}"
+  
+    vim ${_module_file}
+  else
+    vars=$(grep -oE '\{\{[A-Za-z0-9_]+\}\}' "${_template_path}" | sort | uniq | sed -e 's/^{{//' -e 's/}}$//')
+
+    if [[ -z "${vars}" ]]; then
+        if [ "${silent}" == "false" ]; then
+            echo "Warning: No variable was found in ${template}, syntax is {{VAR}}" >&2
+        fi
+    fi
+
+    replaces=""
+
+    # Reads default values defined as {{VAR=value}} and delete those lines
+    # There are evaluated, so you can do {{PATH=$HOME}} or {{PATH=`pwd`}}
+    # You can even reference variables defined in the template before
+    # defaults=$(grep -oE '^\{\{[A-Za-z0-9_]+=.+\}\}' "${_template_path}" | sed -e 's/^{{//' -e 's/}}$//')
+    defaults=""
+
+    for default in ${defaults}; do
+        var=$(echo "${default}" | grep -oE "^[A-Za-z0-9_]+")
+        current=`_create_var_value ${var}`
+
+        # Replace only if var is not set
+        if [[ -z "${current}" ]]; then
+            eval ${default}
+        fi
+
+        # remove define line
+        replaces="-e '/^{{${var}=/d' ${replaces}"
+        vars="${vars}
+    ${current}"
+    done
+
+    vars=$(echo ${vars} | sort | uniq)
+
+    # Replace all {{VAR}} by $VAR value
+    for var in ${vars}; do
+        value=$(MODULE_NAME=${_module_name} _create_var_value ${var} | sed -e "s;\&;\\\&;g" -e "s;\ ;\\\ ;g") # '&' and <space> is escaped 
+        if [[ -z "${value}" ]]; then
+            if [ ${silent} == "false" ]; then
+                echo "Warning: ${var} is not defined and no default is set, replacing by empty" >&2
+            fi
+        fi
+
+        # Escape slashes
+        value=$(echo "${value}" | sed 's/\//\\\//g');
+        replaces="-e 's/{{$var}}/${value}/g' ${replaces}"    
+    done
+
+    escaped_template_path=$(echo ${_template_path} | sed 's/ /\\ /g')
+
+    mkdir -p ${LEPMEPATH}/modules/${_module_name}
+    eval sed ${replaces} "${escaped_template_path}" > ${LEPMEPATH}/modules/${_module_name}/${_module_name}.sh
+  fi
+}
+
+# delete ######################################################################
+
+desc "delete" <<HEREDOC
+Usage:
+  ${_ME} delete <module-name>
+
+Description:
+  Delete a module
+HEREDOC
+delete() {
+  local _module_name="${1:-}"
+
+  if [[ -z "${_module_name}" ]]
+  then
+    _die printf "Module name not provided.\\n"
+  fi
+
+  local _module_dir="${LEPMEPATH}/modules/${_module_name}"
+  local _module_file="${_module_dir}/${_module_name}.sh"
+
+  if [[ -f "${_module_file}" ]]
+  then
+    rm ${_module_file}
+  fi
+
+  rmdir ${_module_dir}
+
+  _success "Deleted module %s.\\n" "${_module_file}"
+}
+
+###############################################################################
+# Run Program
+###############################################################################
+
+_main
